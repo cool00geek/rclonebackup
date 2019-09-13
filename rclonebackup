@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+
+#########
+# Usage #
+#########
+
+# Requires the DISPLAY variable to be set so the notification can show
+# Requires KDE Plasma 5+
+# Use `pull` to add new and updated files from the primary remote to your local working copy
+# Use `push` to add new and updated files from local to the primary remote
+# Use `backup1` to copy all files from the primary remote to the secondary remote, inside a
+#       subdirectory on the root of your secondary remote with today's date in YYYY-MM-DD format
+# Use `backup2` to copy all files from the primary remote to the tertiary remote, inside a
+#       subdirectory on the root of your secondary remote with today's date in YYYY-MM-DD format
+# Be sure to modify everything in the variables section to suit your liking
+
+###########
+# Imports #
+###########
+
+# These are required to run the command and the notification
+import fnmatch, os, subprocess, time
+import re,sys,signal
+
+# This allows controlling of the notification
+# python-dbus on Debian, *buntu, and Mint.
+import dbus
+# Used to parse the arguments
+import argparse
+# Used to get the current date
+from datetime import date
+
+#############
+# Variables #
+#############
+
+# The command parts
+base_cmd =              "rclone -vv -u --progress --stats-one-line copy"
+# The main command to run for every operation
+# Note the verbose switch (-vv) and the 2 progress switches are required to accurately capture the progress
+local_path =            ""
+# The local path where files will be synced with the primary remote
+primary_remote_path =   ""
+# The primary remote which will be synced to the local path
+secondary_remote_path = ""
+# The secondary remote to backup the primary to here
+tertiary_remote_path =  ""
+# The tertiary remote to backup the primary to here
+
+###################
+# Parse arguments #
+###################
+
+# Parse the argument if we want to "push" or "pull" our files
+parser = argparse.ArgumentParser()
+parser.add_argument('push_or_pull', type=str,
+                    help='Specify if pulling or pushing')
+args = parser.parse_args()
+
+# Get the current date when backing up to a remote mirror
+today = str(date.today())
+
+# If pushing, copy from local to remote
+if args.push_or_pull == "push":
+    cmd = base_cmd + " " + local_path + " " + primary_remote_path
+    msg = "Uploading files"
+elif args.push_or_pull == "pull":
+    cmd = base_cmd + " " + primary_remote_path + " " + local_path
+    msg = "Downloading files"
+elif args.push_or_pull == "backup1":
+    cmd = base_cmd + " " + primary_remote_path + " " + secondary_remote_path + today
+    msg = "Backing up primary remote to secondary"
+elif args.push_or_pull == "backup2":
+    cmd = base_cmd + " " + primary_remote_path + " " + tertiary_remote_path + today
+    msg = "Backing up primary remote to tertiary"
+else:
+    exit(1)
+
+################
+# Notification #
+################
+
+# -- Get a handle for the D-Bus API to create a new Job --
+session_bus = dbus.SessionBus()
+
+# A simple little helper function to paper over some complexity
+# See Also: https://dbus.freedesktop.org/doc/dbus-python/doc/tutorial.html
+def get_dbus_interface(name, path, interface):
+    obj = session_bus.get_object(name, path)
+    return dbus.Interface(obj, dbus_interface=interface)
+
+create_handle = get_dbus_interface(
+    'org.kde.kuiserver', '/JobViewServer', 'org.kde.JobViewServer')
+
+# -- Create a Job and get a handle to manipulate it --
+
+# requestView takes (appName, appIconName, capabilities)
+# https://lists.freedesktop.org/archives/xdg/2008-April/009410.html
+# ...but according to the source code, capabilities never got hooked up, so
+# the pause and stop buttons will always be there, whether or not you're
+# listening for them. (And stop will always kill the popup.)
+request_path = create_handle.requestView('RClone', 'upload', 0)
+request_handle = get_dbus_interface(
+    'org.kde.kuiserver', request_path, 'org.kde.JobViewV2')
+
+# Start the process with our command
+print(cmd)
+process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE)
+
+# -- Configure the bits of the popup that won't change in our example --
+request_handle.setInfoMessage(msg)
+#request_handle.setSpeed(200 * 1024**4)  # 200 TiB/s
+
+# -- Do our work --
+
+# NOTE: In Python, indentation outside of () and [] is significant
+try:
+    time.sleep(1) # Sleep a bit for output to start
+    while process.poll() == None: # As long as the process is running, loop
+        #process.send_signal(signal.SIGUSR1)
+        nextline = process.stdout.readline()  # Grab the next line
+        line = nextline.decode('utf-8') # Decode from bytes to utf-8 strings
+        ansi_escape = re.compile(r'\x1B[@-_][0-?]*[ -/]*[@-~]') # Remove ANSI sequences
+        line = ansi_escape.sub('', line)
+        print(line) # Print the line to console for debugging
+        if "(xfr#" in line: # Make sure it's the correct line
+            line = line[line.find('(xfr#') + 5:]
+            line = line.strip()
+            line = line[:line.find(")")]
+            line = line.strip()
+            files_transed = int(float(str(line[:line.find("/")])))
+            line = line[line.find("/")+1:]
+            comma = line.find(',')
+            if comma >= 0:
+                line = line[:comma]
+            files_total = int(float(line))
+            
+            print(str(files_transed) + "/" + str(files_total))
+            
+            #request_handle.setTotalAmount(files_total, 'files') # Use that info to update our notification
+            
+            # Visible in the collapsed view
+            request_handle.setPercent((files_transed / files_total) * 100)
+            request_handle.setDescriptionField(0, 'Processed', str(files_transed))
+            request_handle.setDescriptionField(1, 'Total', str(files_total))
+
+        # These are for the expanded view
+
+    # Set the final state of the popup that will be left behind
+    request_handle.setDescriptionField(0, "Completed successfully.", local_path)
+    request_handle.clearDescriptionField(1)
+    request_handle.terminate("All done")
+except KeyboardInterrupt:
+    print("Ctrl+C Pressed")
+    request_handle.setDescriptionField(0, "Cancelled", "Ctrl+C Pressed")
+    request_handle.clearDescriptionField(1)
+    request_handle.terminate("Cancelled from outside")
+finally:
+    # This gets called no matter what
+    print("Doing cleanup")
+
+# Resources user
+# https://stackoverflow.com/questions/14693701/how-can-i-remove-the-ansi-escape-sequences-from-a-string-in-python
+# https://gist.github.com/hikoz/741643
+# https://stackoverflow.com/questions/54856890/running-dd-from-python-and-getting-progress
