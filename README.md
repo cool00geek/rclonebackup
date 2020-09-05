@@ -2,6 +2,10 @@
 
 A simple python script to interface with rclone to provide an easy and synced backup solution to the target of your choice
 
+## No longer maintained
+
+It's a much better idea to use something better with more resilience and idiot-proofing to avoid data loss. Rclone ideally shouldn't be used as a primary cloud sync solution anyway, there are other better options for this (such as Insync for Onedrive and Google Drive).
+
 ## Features
 
 - Progress bar in notification
